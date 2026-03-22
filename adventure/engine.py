@@ -28,7 +28,7 @@ class GameEngine:
             name="Player",
             type="player",
             attributes={"health": 100},
-            state={"known_info": [initial_prompt] if initial_prompt else []},
+            state={"backstory_seed": initial_prompt.strip() if initial_prompt else "", "status": "alive"},
         )
 
         entities: list[Entity] = [player]
@@ -41,7 +41,7 @@ class GameEngine:
                     name=npc["name"],
                     type="npc",
                     attributes={"faction": npc.get("faction")},
-                    state={"location_id": npc.get("location"), "attitude": "neutral"},
+                    state={"location_id": npc.get("location"), "attitude": "neutral", "status": "active"},
                 )
             )
         for item in scenario.world_seed.get("items", []):
@@ -64,40 +64,55 @@ class GameEngine:
             player_entity_id=player.id,
             inventory_item_ids=[],
             npc_positions={n["id"]: n["location"] for n in scenario.world_seed.get("npcs", [])},
-            active_conditions={"scenario_id": scenario.id},
+            active_conditions={
+                "scenario_id": scenario.id,
+                "scenario_name": scenario.name,
+                "scenario_description": scenario.description,
+                "fallback_reason": None,
+            },
         )
         self.storage.save_world_state(ws)
 
+        start_memories = [
+            {
+                "content": f"Scenario premise: {scenario.description}",
+                "type": "rule",
+                "importance": 0.95,
+                "durability": 0.98,
+                "scope": 0.9,
+                "entity_ids": [player.id],
+                "location_id": ws.current_location_id,
+            },
+            {
+                "content": f"The player begins at {self._location_name(ws.current_location_id)}.",
+                "type": "state",
+                "importance": 0.82,
+                "durability": 0.85,
+                "scope": 0.7,
+                "entity_ids": [player.id, ws.current_location_id],
+                "location_id": ws.current_location_id,
+            },
+        ]
+        if initial_prompt.strip():
+            start_memories.append(
+                {
+                    "content": f"Opening world seed from player: {initial_prompt.strip()}",
+                    "type": "fact",
+                    "importance": 0.78,
+                    "durability": 0.8,
+                    "scope": 0.7,
+                    "entity_ids": [player.id],
+                    "location_id": ws.current_location_id,
+                }
+            )
+
         self.memory.consolidate_after_action(
             Intent(raw="start", action="start"),
-            ActionResult(
-                success=True,
-                narrative=f"Scenario '{scenario.name}' begins. {scenario.description}",
-                memory_candidates=[
-                    {
-                        "content": f"Scenario initialized: {scenario.name}",
-                        "type": "fact",
-                        "importance": 0.9,
-                        "durability": 0.95,
-                        "scope": 0.9,
-                        "entity_ids": [player.id],
-                        "location_id": ws.current_location_id,
-                    },
-                    {
-                        "content": f"Initial player scenario prompt: {initial_prompt}" if initial_prompt else "Player started with no explicit scenario prompt.",
-                        "type": "signal",
-                        "importance": 0.7,
-                        "durability": 0.8,
-                        "scope": 0.7,
-                        "entity_ids": [player.id],
-                        "location_id": ws.current_location_id,
-                    },
-                ],
-            ),
+            ActionResult(success=True, narrative=f"{scenario.name} begins.", memory_candidates=start_memories),
             ws,
         )
 
-        return self.snapshot("Game initialized.")
+        return self.snapshot(f"{scenario.name} begins. {scenario.description}")
 
     def process_turn(self, raw_input: str) -> dict:
         ws = self._require_world_state()
@@ -112,19 +127,27 @@ class GameEngine:
 
         result = self._resolve_action(intent, ws, involved_entities, active_memory)
         self._apply_world_updates(ws, intent, result)
+        self._apply_entity_updates(result.entity_updates, ws)
         ws.turn += 1
         self.storage.save_world_state(ws)
 
         consolidated = self.memory.consolidate_after_action(intent, result, ws)
         self._link_memories_to_entities(consolidated)
 
-        return self.snapshot(result.narrative, intent=intent.action, active_memory=active_memory)
+        return self.snapshot(result.narrative, intent=intent.action, active_memory=active_memory, resolution=result.resolution_meta)
 
-    def snapshot(self, narrative: str, intent: str | None = None, active_memory: list | None = None) -> dict:
+    def snapshot(
+        self,
+        narrative: str,
+        intent: str | None = None,
+        active_memory: list | None = None,
+        resolution: dict | None = None,
+    ) -> dict:
         ws = self._require_world_state()
         entities = self.storage.list_entities()
         location = self.storage.get_entity(ws.current_location_id)
         inventory = [e for e in entities if e.id in ws.inventory_item_ids]
+        npcs_here = [e for e in entities if e.type == "npc" and e.state.get("location_id") == ws.current_location_id]
 
         return {
             "narrative": narrative,
@@ -134,15 +157,25 @@ class GameEngine:
                 "current_location": location.name if location else ws.current_location_id,
                 "inventory": [item.name for item in inventory],
                 "active_conditions": ws.active_conditions,
+                "npcs_here": [npc.name for npc in npcs_here],
             },
             "known_entities": [
-                {"id": e.id, "name": e.name, "type": e.type}
+                {"id": e.id, "name": e.name, "type": e.type, "state": e.state, "attributes": e.attributes}
                 for e in entities
                 if e.type in {"npc", "location", "item", "faction"}
             ],
+            "ai_status": self.gm.get_status(),
+            "resolution": resolution or {},
             "debug": {
+                "ai": self.gm.get_status(),
                 "memory": self.memory.debug_dump(),
                 "active_memory": [m.content for m in (active_memory or [])],
+                "world_state": {
+                    "turn": ws.turn,
+                    "location_id": ws.current_location_id,
+                    "inventory_item_ids": ws.inventory_item_ids,
+                    "npc_positions": ws.npc_positions,
+                },
             },
         }
 
@@ -156,31 +189,34 @@ class GameEngine:
             desc = (loc.attributes or {}).get("description", "No notable details.") if loc else "Unknown place"
             return ActionResult(
                 success=True,
-                narrative=f"You observe {loc.name if loc else 'the area'}: {desc}",
+                narrative=f"You study {loc.name if loc else 'the area'}: {desc}",
                 memory_candidates=[
                     {
-                        "content": f"Player examined location {ws.current_location_id}.",
-                        "type": "event",
-                        "importance": 0.35,
-                        "durability": 0.4,
-                        "scope": 0.2,
+                        "content": f"{loc.name if loc else ws.current_location_id} contains: {desc}",
+                        "type": "fact",
+                        "importance": 0.62,
+                        "durability": 0.74,
+                        "scope": 0.5,
                         "entity_ids": [ws.player_entity_id, ws.current_location_id],
                         "location_id": ws.current_location_id,
                     }
                 ],
+                resolution_meta={"source": "rules", "fallback_used": False},
             )
-        return self.gm.resolve_complex_action(intent, ws, entities, active_memory)
+
+        scenario = get_scenario(str(ws.active_conditions.get("scenario_id", "")))
+        return self.gm.resolve_complex_action(intent, ws, entities, active_memory, scenario)
 
     def _resolve_move(self, intent: Intent, ws: WorldState) -> ActionResult:
         if not intent.destination:
-            return ActionResult(success=False, narrative="Move where?")
+            return ActionResult(success=False, narrative="Move where?", resolution_meta={"source": "rules", "fallback_used": False})
 
         normalized = intent.destination.lower().replace(" ", "-")
         locations = [e for e in self.storage.list_entities() if e.type == "location"]
         match = next((loc for loc in locations if normalized in {loc.id.lower(), loc.name.lower().replace(" ", "-")}), None)
 
         if match is None:
-            return ActionResult(success=False, narrative=f"No reachable location named '{intent.destination}'.")
+            return ActionResult(success=False, narrative=f"No reachable location named '{intent.destination}'.", resolution_meta={"source": "rules", "fallback_used": False})
 
         ws.current_location_id = match.id
         return ActionResult(
@@ -188,29 +224,30 @@ class GameEngine:
             narrative=f"You travel to {match.name}.",
             memory_candidates=[
                 {
-                    "content": f"Player moved to {match.name}.",
+                    "content": f"The player's current location is now {match.name}.",
                     "type": "state",
-                    "importance": 0.65,
-                    "durability": 0.7,
-                    "scope": 0.4,
+                    "importance": 0.8,
+                    "durability": 0.82,
+                    "scope": 0.7,
                     "entity_ids": [ws.player_entity_id, match.id],
                     "location_id": match.id,
                 }
             ],
+            resolution_meta={"source": "rules", "fallback_used": False},
         )
 
     def _resolve_take(self, intent: Intent, ws: WorldState) -> ActionResult:
         if not intent.target:
-            return ActionResult(success=False, narrative="Take what?")
+            return ActionResult(success=False, narrative="Take what?", resolution_meta={"source": "rules", "fallback_used": False})
 
         items = [e for e in self.storage.list_entities() if e.type == "item"]
         item = next((i for i in items if intent.target in i.name.lower() or intent.target == i.id.lower()), None)
         if item is None:
-            return ActionResult(success=False, narrative=f"No item matches '{intent.target}'.")
+            return ActionResult(success=False, narrative=f"No item matches '{intent.target}'.", resolution_meta={"source": "rules", "fallback_used": False})
 
         item_loc = item.state.get("location_id")
         if item_loc != ws.current_location_id:
-            return ActionResult(success=False, narrative=f"{item.name} is not here.")
+            return ActionResult(success=False, narrative=f"{item.name} is not here.", resolution_meta={"source": "rules", "fallback_used": False})
 
         ws.inventory_item_ids.append(item.id)
         item.state["holder_id"] = ws.player_entity_id
@@ -222,15 +259,16 @@ class GameEngine:
             narrative=f"You take the {item.name}.",
             memory_candidates=[
                 {
-                    "content": f"Player acquired {item.name}.",
-                    "type": "event",
-                    "importance": 0.7,
-                    "durability": 0.75,
-                    "scope": 0.5,
+                    "content": f"The player acquired {item.name} and now carries it.",
+                    "type": "state",
+                    "importance": 0.78,
+                    "durability": 0.85,
+                    "scope": 0.7,
                     "entity_ids": [ws.player_entity_id, item.id],
                     "location_id": ws.current_location_id,
                 }
             ],
+            resolution_meta={"source": "rules", "fallback_used": False},
         )
 
     def _apply_world_updates(self, ws: WorldState, intent: Intent, result: ActionResult) -> None:
@@ -239,6 +277,28 @@ class GameEngine:
         ws.active_conditions["last_action"] = intent.raw
         ws.active_conditions["last_updated_at"] = int(time.time())
 
+    def _apply_entity_updates(self, updates: list[dict], ws: WorldState) -> None:
+        for update in updates:
+            entity_id = update.get("entity_id")
+            if not entity_id:
+                continue
+            entity = self.storage.get_entity(entity_id)
+            if entity is None:
+                continue
+
+            for key, value in (update.get("state_updates") or {}).items():
+                entity.state[key] = value
+
+            for key, value in (update.get("relationship_updates") or {}).items():
+                entity.relationships[key] = value
+
+            new_position = update.get("position")
+            if entity.type == "npc" and new_position:
+                entity.state["location_id"] = new_position
+                ws.npc_positions[entity.id] = new_position
+
+            self.storage.upsert_entity(entity)
+
     def _find_involved_entities(self, intent: Intent, ws: WorldState) -> list[Entity]:
         entities = self.storage.list_entities()
         involved = []
@@ -246,6 +306,8 @@ class GameEngine:
             if intent.target and intent.target in e.name.lower():
                 involved.append(e)
             if e.id == ws.current_location_id:
+                involved.append(e)
+            if e.type == "npc" and e.state.get("location_id") == ws.current_location_id:
                 involved.append(e)
         return involved
 
@@ -262,5 +324,9 @@ class GameEngine:
     def _require_world_state(self) -> WorldState:
         ws = self.storage.load_world_state()
         if ws is None:
-            raise RuntimeError("No world state exists. Start a new game first.")
+            raise RuntimeError("No active world state")
         return ws
+
+    def _location_name(self, location_id: str) -> str:
+        loc = self.storage.get_entity(location_id)
+        return loc.name if loc else location_id

@@ -64,7 +64,9 @@ class ActionResult:
     success: bool
     narrative: str
     world_updates: dict[str, Any] = field(default_factory=dict)
+    entity_updates: list[dict[str, Any]] = field(default_factory=list)
     memory_candidates: list[dict[str, Any]] = field(default_factory=list)
+    resolution_meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
