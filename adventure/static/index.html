@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Memory Adventure Engine</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; background: #0b1020; color: #dbe5ff; }
+      .layout { display: grid; grid-template-columns: 2fr 1fr; min-height: 100vh; }
+      .main { padding: 16px; border-right: 1px solid #2a355f; }
+      .sidebar { padding: 16px; background: #111833; }
+      .log { height: 62vh; overflow: auto; border: 1px solid #2a355f; border-radius: 8px; padding: 12px; background: #091129; }
+      .entry { margin-bottom: 12px; }
+      input, textarea, select, button { width: 100%; padding: 8px; margin-top: 6px; margin-bottom: 8px; border-radius: 6px; border: 1px solid #2a355f; background: #0f1836; color: #dbe5ff; }
+      button { cursor: pointer; background: #2845a7; }
+      pre { white-space: pre-wrap; background: #0a122b; padding: 8px; border-radius: 6px; border: 1px solid #27325c; max-height: 240px; overflow: auto; }
+      h2, h3 { margin-top: 0; }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <section class="main">
+        <h2>AI Text Adventure Engine</h2>
+        <div class="log" id="log"></div>
+
+        <h3>Start / Reset Game</h3>
+        <label>Scenario</label>
+        <select id="scenario">
+          <option value="fallen-city">Fallen City</option>
+          <option value="orbit-station">Orbit Station Blackout</option>
+        </select>
+        <label>Initial Scenario Prompt (player-defined world setup)</label>
+        <textarea id="initialPrompt" rows="3" placeholder="I am a former warden seeking redemption..."></textarea>
+        <button id="newGameBtn">Start New Game</button>
+
+        <h3>Action</h3>
+        <input id="actionInput" placeholder="e.g. go to bazaar, attack guard with dagger" />
+        <button id="actionBtn">Submit Action</button>
+      </section>
+
+      <aside class="sidebar">
+        <h3>World</h3>
+        <div id="location"></div>
+        <div id="inventory"></div>
+
+        <h3>Known Entities</h3>
+        <ul id="entities"></ul>
+
+        <h3>Debug</h3>
+        <small>Active retrieved memory + full memory state</small>
+        <pre id="debug"></pre>
+      </aside>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
